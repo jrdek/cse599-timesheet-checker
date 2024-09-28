@@ -22,6 +22,7 @@ print(f'{students_with_sheets}/{total_students} have shared timesheets.')
 print()
 
 MAXLINE = 300
+day_zero = date(2024, 9, 23)
 
 
 def fetch_logs(sheet_url):
@@ -45,10 +46,14 @@ def get_unlogged_days(col_a, col_c, targ_date):
             if day not in checked_days:
                 checked_days[day] = set()
             checked_days[day].add(col_c[i])
-    # now that we've gathered all days before targ_date,
-    # flag the days whose only value is ''
-    for day in checked_days:
-        if len(checked_days[day]) == 1 and '' in checked_days[day]:
+    # now that we've gathered all days in the log before targ_date,
+    # flag the days whose only value is ''.
+    # also flag days that are not in the log at all.
+    for day in range((targ_date - day_zero).days):
+        day = day_zero + timedelta(days=day)
+        if day not in checked_days:
+            unlogged_days.append(day.strftime('%B %d'))
+        elif len(checked_days[day]) == 1 and '' in checked_days[day]:
             unlogged_days.append(day.strftime('%B %d'))
     return unlogged_days
 
@@ -62,7 +67,7 @@ def get_zero_weeks(col_a, col_c, targ_date):
     assert(len(week_totals) == 12)  # weeks 0-10, plus finals week  
     zero_weeks = []
     for i in range(len(week_totals)):
-        if targ_date >= date(2021, 9, 23) + timedelta(weeks=i):
+        if targ_date >= day_zero + timedelta(weeks=i):
             if not week_totals[i]:
                 zero_weeks.append(f'Week {i}' if i < 11 else 'Finals week')
     return zero_weeks
