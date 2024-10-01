@@ -1,104 +1,84 @@
 import gspread
-import re
 from datetime import date, timedelta
 from dateutil import parser
+from typing import Dict, List
+import time
 
-gc = gspread.oauth()
 
-total_students = 0
-students_with_sheets = 0
-with open('timesheets.csv', 'r') as f:
-    names_and_timesheet_urls = []
-    for line in f:
-        if line.startswith('#'):
-            continue
-        total_students += 1
-        if ';https' in line:
-            name, url = line.strip().split(';',1)
-            names_and_timesheet_urls.append((name, url))
-            students_with_sheets += 1
-
-print(f'{students_with_sheets}/{total_students} have shared timesheets.')
-print()
-
-MAXLINE = 300
+max_lines = 300
 day_zero = date(2024, 9, 23)
+today = date.today()
+qtr_length = 86  # (days)
 
 
-def fetch_logs(sheet_url):
-    ws = gc.open_by_url(sheet_url).get_worksheet(0)
-    col_a = [_[0] if _ else '' for _ in ws.get(f'A1:A{MAXLINE}')]
-    col_c = [_[0] if _ else '' for _ in ws.get(f'C1:C{MAXLINE}')]
-    return col_a, col_c
+class Timesheet():
+    # student name
+    name : str
+    # total hours worked per day
+    hours : Dict[date, float]
 
-
-def get_unlogged_days(col_a, col_c, targ_date):
-    # Flag all dates strictly before targ_date where col_c is empty
-    checked_days = {}
-    unlogged_days = []
-    for (i, day_cell) in enumerate(col_a):
-        # make sure it's a date cell
-        try:
-            day = parser.parse(day_cell).date()
-        except ValueError:
-            continue  # skip non-date cells in col A
-        if day < targ_date:
-            if day not in checked_days:
-                checked_days[day] = set()
-            checked_days[day].add(col_c[i])
-    # now that we've gathered all days in the log before targ_date,
-    # flag the days whose only value is ''.
-    # also flag days that are not in the log at all.
-    for day in range((targ_date - day_zero).days):
-        day = day_zero + timedelta(days=day)
-        if day not in checked_days:
-            unlogged_days.append(day.strftime('%B %d'))
-        elif len(checked_days[day]) == 1 and '' in checked_days[day]:
-            unlogged_days.append(day.strftime('%B %d'))
-    return unlogged_days
-
-
-def get_zero_weeks(col_a, col_c, targ_date):
-    week_totals = []
-    week_total_re = re.compile(r'Week \d+ total hours')
-    for i in range(len(col_a)):
-        if week_total_re.match(col_a[i]) or col_a[i] == 'Finals Week total hours':
-            week_totals.append(col_c[i])
-    assert(len(week_totals) == 12)  # weeks 0-10, plus finals week  
-    zero_weeks = []
-    for i in range(len(week_totals)):
-        if targ_date >= day_zero + timedelta(weeks=i):
-            if not week_totals[i]:
-                zero_weeks.append(f'Week {i}' if i < 11 else 'Finals week')
-    return zero_weeks
-
-
-def validate_cols(name, col_a, col_c, targ_date):
-    name = ' '.join(name.split(',')[::-1])
-    unlogged_days = get_unlogged_days(col_a, col_c, targ_date)
-    zero_weeks = get_zero_weeks(col_a, col_c, targ_date)
-    if not unlogged_days and not zero_weeks:
-        summary = f'{name}: OK.'
-    else:
-        summary = f'{name}: Missing data...'
-    report = [summary]
-    if unlogged_days:
-        report.append(f'  {len(unlogged_days)} unlogged days:')
-        for day in unlogged_days:
-            report.append(f'    {day}')
-    if zero_weeks:
-        report.append(f'  {len(zero_weeks)} weeks with 0 hours:')
-        for week in zero_weeks:
-            report.append(f'    {week}')
-    return '\n'.join(report)
-
-
-def validate(name, sheet_url, targ_date):
-    report = validate_cols(name, *fetch_logs(sheet_url), targ_date)
-    print(report)
+    def __init__(self, name : str, url : str, gc : gspread.Client):
+        self.name = name
+        self.daily_hours = {(day_zero + timedelta(i)): 0.0 for i in range(qtr_length)}
+        self.weekly_hours = [0.0] * 12  # weeks 0-10, plus finals week
+        self.populate(url, gc)
+    
+    def populate(self, url : str, gc : gspread.Client):
+        # first, fetch data from the Google Sheet
+        ws = gc.open_by_url(url).get_worksheet(0)
+        col_a = [_[0] if _ else '' for _ in ws.get(f'A1:A{max_lines}')]
+        col_c = [_[0] if _ else '' for _ in ws.get(f'C1:C{max_lines}')]
+        # now parse the data        
+        for day_txt, hours in zip(col_a, col_c):
+            try:
+                day = parser.parse(day_txt).date()
+            except ValueError:
+                continue
+            self.daily_hours[day] += float(hours) if hours else 0.0
+        # also calculate weekly hour totals
+        for week in range(11):
+            self.weekly_hours[week] = sum(self.daily_hours[day_zero + timedelta(week*7 + i)] for i in range(7))
+        self.weekly_hours[11] = sum(self.daily_hours[day_zero + timedelta(i)] for i in range(77, qtr_length))
+    
+    def unlogged_days(self, targ_date : date) -> List[date]:
+        return [day for day in self.daily_hours if day < targ_date and self.daily_hours[day] == 0.0]
+    
+    def zero_weeks(self, targ_date : date) -> List[int]:
+        current_week = (targ_date - day_zero).days // 7
+        return list(filter(lambda i: self.weekly_hours[i] == 0.0, range(current_week)))
+    
+    def __repr__(self) -> str:
+        return f"<{self.name}>"
+    
+    def __str__(self) -> str:
+        unlogged_days = self.unlogged_days(today)
+        zero_weeks = self.zero_weeks(today)
+        if unlogged_days or zero_weeks:
+            days_str = f"Unlogged days: {len(unlogged_days)}."
+            weeks_str = f"Zero weeks: {len(zero_weeks)}."
+            status = f"{days_str: ^20} {weeks_str: >15}"
+        else:
+            status = "OK."
+        return f"{(self.name+":"): <30} {status}"
 
 
 if __name__ == '__main__':
+    gc = gspread.oauth()
     today = date.today()
-    for (name, url) in names_and_timesheet_urls:
-        validate(name, url, today)
+
+    timesheets = []
+
+    total_students = 0
+    students_with_sheets = 0
+    with open('timesheets.csv', 'r') as f:
+        for line in f:
+            # (skip comments and blank lines)
+            if line.startswith('#') or not line.strip():
+                continue
+            total_students += 1
+            if ';https' in line:
+                name, url = line.strip().split(';',1)
+                timesheets.append(Timesheet(name, url, gc))
+                time.sleep(2)  # avoid rate limiting
+
+    print("\n".join(str(_) for _ in timesheets))
